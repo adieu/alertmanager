@@ -129,6 +129,14 @@ func BuildReceiverIntegrations(nc *config.Receiver, tmpl *template.Template) []I
 		n := NewPushover(c, tmpl)
 		add("pushover", i, n, c)
 	}
+	for i, c := range nc.DingtalkConfigs {
+		n := NewDingtalk(c, tmpl)
+		add("dingtalk", i, n, c)
+	}
+	for i, c := range nc.WechatConfigs {
+		n := NewWechat(c, tmpl)
+		add("wechat", i, n, c)
+	}
 	return integrations
 }
 
@@ -929,6 +937,311 @@ func (n *Pushover) Notify(ctx context.Context, as ...*types.Alert) (bool, error)
 			return false, err
 		}
 		return false, fmt.Errorf("unexpected status code %v (body: %s)", resp.StatusCode, string(body))
+	}
+
+	return false, nil
+}
+
+// Dingtalk implements a Notifier for Dingtalk notifications.
+type Dingtalk struct {
+	conf        *config.DingtalkConfig
+	tmpl        *template.Template
+	accessToken string
+	expire      time.Time
+}
+
+// NewDingtalk returns a new Dingtalk notifier.
+func NewDingtalk(c *config.DingtalkConfig, t *template.Template) *Dingtalk {
+	return &Dingtalk{conf: c, tmpl: t}
+}
+
+func (n *Dingtalk) getAccessToken(ctx context.Context) (string, error) {
+	if n.expire.After(time.Now()) {
+		return n.accessToken, nil
+	}
+
+	parameters := url.Values{}
+	parameters.Add("corpid", string(n.conf.CorpID))
+	parameters.Add("corpsecret", string(n.conf.CorpSecret))
+
+	apiURL := "https://oapi.dingtalk.com/gettoken"
+	u, err := url.Parse(apiURL)
+	if err != nil {
+		return "", fmt.Errorf("error format access token url")
+	}
+	u.RawQuery = parameters.Encode()
+
+	resp, err := ctxhttp.Get(ctx, http.DefaultClient, u.String())
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	// Only documented behaviour is that 2xx response codes are successful and
+	// 4xx are unsuccessful, therefore assuming only 5xx are recoverable.
+	// https://pushover.net/api#response
+	if resp.StatusCode/100 == 5 {
+		return "", fmt.Errorf("unexpected status code %v", resp.StatusCode)
+	}
+
+	if resp.StatusCode/100 != 2 {
+		body, err := ioutil.ReadAll(resp.Body)
+		if err != nil {
+			return "", err
+		}
+		return "", fmt.Errorf("unexpected status code %v (body: %s)", resp.StatusCode, string(body))
+	}
+
+	body, err := ioutil.ReadAll(resp.Body)
+
+	token := struct {
+		AccessToken string `json:"access_token"`
+		ErrMsg      int64  `json:"errmsg"`
+		ErrCode     string `json:"errcode"`
+	}{}
+
+	err = json.Unmarshal(body, &token)
+	if err != nil {
+		return "", fmt.Errorf("Error unmarshal response %v", err)
+	}
+
+	n.accessToken = token.AccessToken
+	n.expire = time.Now().Add(7200 * time.Second)
+	return token.AccessToken, nil
+}
+
+// Notify implements the Notifier interface.
+func (n *Dingtalk) Notify(ctx context.Context, as ...*types.Alert) (bool, error) {
+	key, ok := GroupKey(ctx)
+	if !ok {
+		return false, fmt.Errorf("group key missing")
+	}
+	data := n.tmpl.Data(receiverName(ctx), groupLabels(ctx), as...)
+
+	log.With("incident", key).Debugln("notifying Dingtalk")
+
+	var err error
+	tmpl := tmplText(n.tmpl, data, &err)
+
+	message := tmpl(n.conf.Message)
+	message = strings.TrimSpace(message)
+
+	accessToken, err := n.getAccessToken(ctx)
+	if err != nil {
+		return true, err
+	}
+
+	parameters := url.Values{}
+	parameters.Add("access_token", accessToken)
+
+	apiURL := "https://oapi.dingtalk.com/message/send"
+	u, err := url.Parse(apiURL)
+	if err != nil {
+		return false, fmt.Errorf("error format url")
+	}
+	u.RawQuery = parameters.Encode()
+
+	type Text struct {
+		Content string `json:"content"`
+	}
+
+	payload := struct {
+		ToUser  string `json:"touser,omitempty"`
+		ToParty string `json:"toparty,omitempty"`
+		MsgType string `json:"msgtype"`
+		AgentID string `json:"agentid"`
+		Text    Text   `json:"text"`
+	}{
+		ToUser:  n.conf.ToUser,
+		ToParty: n.conf.ToParty,
+		MsgType: "text",
+		AgentID: n.conf.AgentID,
+		Text:    Text{message},
+	}
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(payload); err != nil {
+		return false, err
+	}
+
+	resp, err := ctxhttp.Post(ctx, http.DefaultClient, u.String(), "application/json", &buf)
+	if err != nil {
+		return true, err
+	}
+	defer resp.Body.Close()
+
+	// Only documented behaviour is that 2xx response codes are successful and
+	// 4xx are unsuccessful, therefore assuming only 5xx are recoverable.
+	// https://pushover.net/api#response
+	if resp.StatusCode/100 == 5 {
+		return true, fmt.Errorf("unexpected status code %v", resp.StatusCode)
+	}
+
+	if resp.StatusCode/100 != 2 {
+		body, err := ioutil.ReadAll(resp.Body)
+		if err != nil {
+			return false, err
+		}
+		return false, fmt.Errorf("unexpected status code %v (body: %s)", resp.StatusCode, string(body))
+	}
+	if err != nil {
+		log.With("incident", key).Debugln("notifying Dingtalk error")
+		return true, err
+	}
+
+	return false, nil
+}
+
+// Wechat implements a Notifier for Wechat notifications.
+type Wechat struct {
+	conf        *config.WechatConfig
+	tmpl        *template.Template
+	accessToken string
+	expire      time.Time
+}
+
+func (n *Wechat) getAccessToken(ctx context.Context) (string, error) {
+	if n.expire.After(time.Now()) {
+		return n.accessToken, nil
+	}
+
+	parameters := url.Values{}
+	parameters.Add("corpid", string(n.conf.CorpID))
+	parameters.Add("corpsecret", string(n.conf.CorpSecret))
+
+	apiURL := "https://qyapi.weixin.qq.com/cgi-bin/gettoken"
+	u, err := url.Parse(apiURL)
+	if err != nil {
+		return "", fmt.Errorf("error format access token url")
+	}
+	u.RawQuery = parameters.Encode()
+
+	resp, err := ctxhttp.Get(ctx, http.DefaultClient, u.String())
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	// Only documented behaviour is that 2xx response codes are successful and
+	// 4xx are unsuccessful, therefore assuming only 5xx are recoverable.
+	// https://pushover.net/api#response
+	if resp.StatusCode/100 == 5 {
+		return "", fmt.Errorf("unexpected status code %v", resp.StatusCode)
+	}
+
+	if resp.StatusCode/100 != 2 {
+		body, err := ioutil.ReadAll(resp.Body)
+		if err != nil {
+			return "", err
+		}
+		return "", fmt.Errorf("unexpected status code %v (body: %s)", resp.StatusCode, string(body))
+	}
+
+	body, err := ioutil.ReadAll(resp.Body)
+
+	token := struct {
+		AccessToken string `json:"access_token"`
+		ExpiresIn   int64  `json:"expires_in"`
+	}{}
+
+	err = json.Unmarshal(body, &token)
+	if err != nil {
+		return "", fmt.Errorf("Error unmarshal response %v", err)
+	}
+
+	n.accessToken = token.AccessToken
+	n.expire = time.Now().Add(time.Duration(token.ExpiresIn) * time.Second)
+	return token.AccessToken, nil
+}
+
+// NewWechat returns a new Wechat notifier.
+func NewWechat(c *config.WechatConfig, t *template.Template) *Wechat {
+	return &Wechat{conf: c, tmpl: t}
+}
+
+// Notify implements the Notifier interface.
+func (n *Wechat) Notify(ctx context.Context, as ...*types.Alert) (bool, error) {
+	key, ok := GroupKey(ctx)
+	if !ok {
+		return false, fmt.Errorf("group key missing")
+	}
+	data := n.tmpl.Data(receiverName(ctx), groupLabels(ctx), as...)
+
+	log.With("incident", key).Debugln("notifying Wechat")
+
+	var err error
+	tmpl := tmplText(n.tmpl, data, &err)
+
+	message := tmpl(n.conf.Message)
+	message = strings.TrimSpace(message)
+	if message == "" {
+		// Wechat rejects empty messages.
+		message = "(no details)"
+	}
+
+	accessToken, err := n.getAccessToken(ctx)
+	if err != nil {
+		return true, err
+	}
+
+	parameters := url.Values{}
+	parameters.Add("access_token", accessToken)
+
+	apiURL := "https://qyapi.weixin.qq.com/cgi-bin/message/send"
+	u, err := url.Parse(apiURL)
+	if err != nil {
+		return false, fmt.Errorf("error format url")
+	}
+	u.RawQuery = parameters.Encode()
+
+	type Text struct {
+		Content string `json:"content"`
+	}
+
+	payload := struct {
+		ToUser  string `json:"touser,omitempty"`
+		ToParty string `json:"toparty,omitempty"`
+		ToTag   string `json:"totag,omitempty"`
+		MsgType string `json:"msgtype"`
+		AgentID int    `json:"agentid"`
+		Text    Text   `json:"text"`
+	}{
+		ToUser:  n.conf.ToUser,
+		ToParty: n.conf.ToParty,
+		ToTag:   n.conf.ToTag,
+		MsgType: "text",
+		AgentID: n.conf.AgentID,
+		Text:    Text{message},
+	}
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(payload); err != nil {
+		return false, err
+	}
+
+	resp, err := ctxhttp.Post(ctx, http.DefaultClient, u.String(), "application/json", &buf)
+	if err != nil {
+		return true, err
+	}
+	defer resp.Body.Close()
+
+	// Only documented behaviour is that 2xx response codes are successful and
+	// 4xx are unsuccessful, therefore assuming only 5xx are recoverable.
+	// https://pushover.net/api#response
+	if resp.StatusCode/100 == 5 {
+		return true, fmt.Errorf("unexpected status code %v", resp.StatusCode)
+	}
+
+	if resp.StatusCode/100 != 2 {
+		body, err := ioutil.ReadAll(resp.Body)
+		if err != nil {
+			return false, err
+		}
+		return false, fmt.Errorf("unexpected status code %v (body: %s)", resp.StatusCode, string(body))
+	}
+	if err != nil {
+		log.With("incident", key).Debugln("notifying Wechat error")
+		return true, err
 	}
 
 	return false, nil

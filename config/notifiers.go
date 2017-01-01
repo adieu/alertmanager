@@ -115,6 +115,18 @@ var (
 		Retry:    duration(1 * time.Minute),
 		Expire:   duration(1 * time.Hour),
 	}
+	DefaultDingtalkConfig = DingtalkConfig{
+		NotifierConfig: NotifierConfig{
+			VSendResolved: true,
+		},
+		Message: `{{ template "__subject" . }}`,
+	}
+	DefaultWechatConfig = WechatConfig{
+		NotifierConfig: NotifierConfig{
+			VSendResolved: true,
+		},
+		Message: `{{ template "__subject" . }}`,
+	}
 )
 
 // NotifierConfig contains base options common across all notifier configurations.
@@ -391,4 +403,77 @@ func (c *PushoverConfig) UnmarshalYAML(unmarshal func(interface{}) error) error 
 		return fmt.Errorf("missing token in Pushover config")
 	}
 	return checkOverflow(c.XXX, "pushover config")
+}
+
+type DingtalkConfig struct {
+	NotifierConfig `yaml:",inline" json:",inline"`
+
+	CorpID     Secret `yaml:"corp_id" json:"corp_id"`
+	CorpSecret Secret `yaml:"corp_secret" json:"corp_secret"`
+	AgentID    string `yaml:"agent_id" json:"agent_id"`
+	ToUser     string `yaml:"to_user" json:"to_user"`
+	ToParty    string `yaml:"to_party" json:"to_party"`
+	Message    string `yaml:"message" json:"message"`
+
+	// Catches all undefined fields and must be empty after parsing.
+	XXX map[string]interface{} `yaml:",inline" json:"-"`
+}
+
+// UnmarshalYAML implements the yaml.Unmarshaler interface.
+func (c *DingtalkConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
+	*c = DefaultDingtalkConfig
+	type plain DingtalkConfig
+	if err := unmarshal((*plain)(c)); err != nil {
+		return err
+	}
+	if c.CorpID == "" {
+		return fmt.Errorf("missing corp id in Dingtalk config")
+	}
+	if c.CorpSecret == "" {
+		return fmt.Errorf("missing corp secret in Dingtalk config")
+	}
+	if c.AgentID == "" {
+		return fmt.Errorf("missing agent id in Dingtalk config")
+	}
+	if c.ToUser == "" && c.ToParty == "" {
+		return fmt.Errorf("missing to_user or to_party in Dingtalk config")
+	}
+	return checkOverflow(c.XXX, "dingtalk config")
+}
+
+type WechatConfig struct {
+	NotifierConfig `yaml:",inline" json:",inline"`
+
+	CorpID     Secret `yaml:"corp_id" json:"corp_id"`
+	CorpSecret Secret `yaml:"corp_secret" json:"corp_secret"`
+	AgentID    int    `yaml:"agent_id" json:"agent_id"`
+	ToUser     string `yaml:"to_user" json:"to_user"`
+	ToParty    string `yaml:"to_party" json:"to_party"`
+	ToTag      string `yaml:"to_tag" json:"to_tag"`
+	Message    string `yaml:"message" json:"message"`
+
+	// Catches all undefined fields and must be empty after parsing.
+	XXX map[string]interface{} `yaml:",inline" json:"-"`
+}
+
+// UnmarshalYAML implements the yaml.Unmarshaler interface.
+func (c *WechatConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
+	*c = DefaultWechatConfig
+	type plain WechatConfig
+	if err := unmarshal((*plain)(c)); err != nil {
+		return err
+	}
+	if c.CorpID == "" {
+		return fmt.Errorf("missing corp id in Wechat config")
+	}
+	if c.CorpSecret == "" {
+		return fmt.Errorf("missing corp secret in Wechat config")
+	}
+	if c.AgentID == 0 {
+		return fmt.Errorf("missing agent id in Wechat config")
+	}
+	if c.ToUser == "" && c.ToParty == "" && c.ToTag == "" {
+		c.ToUser = "@all"
+	}
+	return checkOverflow(c.XXX, "wechat config")
 }
