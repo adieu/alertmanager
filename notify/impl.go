@@ -996,8 +996,8 @@ func (n *Dingtalk) getAccessToken(ctx context.Context) (string, error) {
 
 	token := struct {
 		AccessToken string `json:"access_token"`
-		ErrMsg      int64  `json:"errmsg"`
-		ErrCode     string `json:"errcode"`
+		ErrMsg      string `json:"errmsg"`
+		ErrCode     int64  `json:"errcode"`
 	}{}
 
 	err = json.Unmarshal(body, &token)
